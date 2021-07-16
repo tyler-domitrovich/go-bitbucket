@@ -247,7 +247,7 @@ func (c *Client) execute(method string, urlStr string, text string) (interface{}
 					if valuesSlice != nil {
 						if c.MaxNumPages > 0 {
 							if pageNum >= c.MaxNumPages {
-								return nil, err
+								return result, nil
 							}
 							pageNum++
 						}
