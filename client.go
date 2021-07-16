@@ -22,6 +22,7 @@ import (
 )
 
 const DEFAULT_PAGE_LENGTH = 10
+const DEFAULT_MAX_NUM_PAGES = 0
 const DEFAULT_MAX_DEPTH = 1
 const DEFAULT_BITBUCKET_API_BASE_URL = "https://api.bitbucket.org/2.0"
 
@@ -42,6 +43,7 @@ type Client struct {
 	Repositories *Repositories
 	Workspaces   *Workspace
 	Pagelen      uint64
+	MaxNumPages  uint64
 	MaxDepth     uint64
 	apiBaseURL   *url.URL
 
@@ -139,7 +141,7 @@ func injectClient(a *auth) *Client {
 	if err != nil {
 		log.Fatalf("invalid bitbucket url")
 	}
-	c := &Client{Auth: a, Pagelen: DEFAULT_PAGE_LENGTH, MaxDepth: DEFAULT_MAX_DEPTH, apiBaseURL: bitbucketUrl}
+	c := &Client{Auth: a, Pagelen: DEFAULT_PAGE_LENGTH, MaxNumPages: DEFAULT_MAX_NUM_PAGES, MaxDepth: DEFAULT_MAX_DEPTH, apiBaseURL: bitbucketUrl}
 	c.Repositories = &Repositories{
 		c:                  c,
 		PullRequests:       &PullRequests{c: c},
@@ -188,87 +190,98 @@ func (c *Client) executeRaw(method string, urlStr string, text string) (io.ReadC
 }
 
 func (c *Client) execute(method string, urlStr string, text string) (interface{}, error) {
-	// Use pagination if changed from default value
-	const DEC_RADIX = 10
-	if strings.Contains(urlStr, "/repositories/") {
-		if c.Pagelen != DEFAULT_PAGE_LENGTH {
-			urlObj, err := url.Parse(urlStr)
-			if err != nil {
-				return nil, err
+	var pageNum uint64 = 0
+	var execute func(method string, urlStr string, text string) (interface{}, error)
+	execute = func(method string, urlStr string, text string) (i interface{}, e error) {
+		// Use pagination if changed from default value
+		const DEC_RADIX = 10
+		if strings.Contains(urlStr, "/repositories/") {
+			if c.Pagelen != DEFAULT_PAGE_LENGTH {
+				urlObj, err := url.Parse(urlStr)
+				if err != nil {
+					return nil, err
+				}
+				q := urlObj.Query()
+				q.Set("pagelen", strconv.FormatUint(c.Pagelen, DEC_RADIX))
+				urlObj.RawQuery = q.Encode()
+				urlStr = urlObj.String()
 			}
-			q := urlObj.Query()
-			q.Set("pagelen", strconv.FormatUint(c.Pagelen, DEC_RADIX))
-			urlObj.RawQuery = q.Encode()
-			urlStr = urlObj.String()
+
+			if c.MaxDepth != DEFAULT_MAX_DEPTH {
+				urlObj, err := url.Parse(urlStr)
+				if err != nil {
+					return nil, err
+				}
+				q := urlObj.Query()
+				q.Set("max_depth", strconv.FormatUint(c.MaxDepth, DEC_RADIX))
+				urlObj.RawQuery = q.Encode()
+				urlStr = urlObj.String()
+			}
 		}
 
-		if c.MaxDepth != DEFAULT_MAX_DEPTH {
-			urlObj, err := url.Parse(urlStr)
-			if err != nil {
-				return nil, err
-			}
-			q := urlObj.Query()
-			q.Set("max_depth", strconv.FormatUint(c.MaxDepth, DEC_RADIX))
-			urlObj.RawQuery = q.Encode()
-			urlStr = urlObj.String()
+		body := strings.NewReader(text)
+
+		req, err := http.NewRequest(method, urlStr, body)
+		if err != nil {
+			return nil, err
 		}
-	}
+		if text != "" {
+			req.Header.Set("Content-Type", "application/json")
+		}
 
-	body := strings.NewReader(text)
+		c.authenticateRequest(req)
+		result, err := c.doRequest(req, false)
+		if err != nil {
+			return nil, err
+		}
 
-	req, err := http.NewRequest(method, urlStr, body)
-	if err != nil {
-		return nil, err
-	}
-	if text != "" {
-		req.Header.Set("Content-Type", "application/json")
-	}
-
-	c.authenticateRequest(req)
-	result, err := c.doRequest(req, false)
-	if err != nil {
-		return nil, err
-	}
-
-	//autopaginate.
-	resultMap, isMap := result.(map[string]interface{})
-	if isMap {
-		nextIn := resultMap["next"]
-		valuesIn := resultMap["values"]
-		if nextIn != nil && valuesIn != nil {
-			nextUrl := nextIn.(string)
-			if nextUrl != "" {
-				valuesSlice := valuesIn.([]interface{})
-				if valuesSlice != nil {
-					nextResult, err := c.execute(method, nextUrl, text)
-					if err != nil {
-						return nil, err
+		//autopaginate.
+		resultMap, isMap := result.(map[string]interface{})
+		if isMap {
+			nextIn := resultMap["next"]
+			valuesIn := resultMap["values"]
+			if nextIn != nil && valuesIn != nil {
+				nextUrl := nextIn.(string)
+				if nextUrl != "" {
+					valuesSlice := valuesIn.([]interface{})
+					if valuesSlice != nil {
+						if c.MaxNumPages > 0 {
+							if pageNum >= c.MaxNumPages {
+								return nil, err
+							}
+							pageNum++
+						}
+						nextResult, err := execute(method, nextUrl, text)
+						if err != nil {
+							return nil, err
+						}
+						nextResultMap, isNextMap := nextResult.(map[string]interface{})
+						if !isNextMap {
+							return nil, fmt.Errorf("next page result is not map, it's %T", nextResult)
+						}
+						nextValuesIn := nextResultMap["values"]
+						if nextValuesIn == nil {
+							return nil, fmt.Errorf("next page result has no values")
+						}
+						nextValuesSlice, isSlice := nextValuesIn.([]interface{})
+						if !isSlice {
+							return nil, fmt.Errorf("next page result 'values' is not slice")
+						}
+						valuesSlice = append(valuesSlice, nextValuesSlice...)
+						resultMap["values"] = valuesSlice
+						delete(resultMap, "page")
+						delete(resultMap, "pagelen")
+						delete(resultMap, "max_depth")
+						delete(resultMap, "size")
+						result = resultMap
 					}
-					nextResultMap, isNextMap := nextResult.(map[string]interface{})
-					if !isNextMap {
-						return nil, fmt.Errorf("next page result is not map, it's %T", nextResult)
-					}
-					nextValuesIn := nextResultMap["values"]
-					if nextValuesIn == nil {
-						return nil, fmt.Errorf("next page result has no values")
-					}
-					nextValuesSlice, isSlice := nextValuesIn.([]interface{})
-					if !isSlice {
-						return nil, fmt.Errorf("next page result 'values' is not slice")
-					}
-					valuesSlice = append(valuesSlice, nextValuesSlice...)
-					resultMap["values"] = valuesSlice
-					delete(resultMap, "page")
-					delete(resultMap, "pagelen")
-					delete(resultMap, "max_depth")
-					delete(resultMap, "size")
-					result = resultMap
 				}
 			}
 		}
-	}
 
-	return result, nil
+		return result, nil
+	}
+	return execute(method, urlStr, text)
 }
 
 func (c *Client) executeFileUpload(method string, urlStr string, filePath string, fileName string, fieldname string, params map[string]string) (interface{}, error) {
