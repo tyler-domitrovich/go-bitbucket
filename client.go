@@ -235,6 +235,13 @@ func (c *Client) execute(method string, urlStr string, text string) (interface{}
 			return nil, err
 		}
 
+		if c.MaxNumPages > 0 {
+			if pageNum >= c.MaxNumPages {
+				return result, nil
+			}
+			pageNum++
+		}
+
 		//autopaginate.
 		resultMap, isMap := result.(map[string]interface{})
 		if isMap {
@@ -245,12 +252,6 @@ func (c *Client) execute(method string, urlStr string, text string) (interface{}
 				if nextUrl != "" {
 					valuesSlice := valuesIn.([]interface{})
 					if valuesSlice != nil {
-						if c.MaxNumPages > 0 {
-							if pageNum >= c.MaxNumPages {
-								return result, nil
-							}
-							pageNum++
-						}
 						nextResult, err := execute(method, nextUrl, text)
 						if err != nil {
 							return nil, err
