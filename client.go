@@ -190,7 +190,7 @@ func (c *Client) executeRaw(method string, urlStr string, text string) (io.ReadC
 }
 
 func (c *Client) execute(method string, urlStr string, text string) (interface{}, error) {
-	var pageNum uint64 = 0
+	var pageNum uint64 = 1
 	var execute func(method string, urlStr string, text string) (interface{}, error)
 	execute = func(method string, urlStr string, text string) (i interface{}, e error) {
 		// Use pagination if changed from default value
